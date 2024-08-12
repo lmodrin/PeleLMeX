@@ -94,8 +94,10 @@ PeleLM::computeDifferentialDiffusionTerms(
       ? Vector<std::array<MultiFab*, AMREX_SPACEDIM>>{}
       : GetVecOfArrOfPtrs(diffData->wbar_fluxes);
   Vector<std::array<MultiFab*, AMREX_SPACEDIM>> soretFluxVec =
-    (m_use_soret) != 0 ? GetVecOfArrOfPtrs(diffData->soret_fluxes)
-                       : Vector<std::array<MultiFab*, AMREX_SPACEDIM>>{};
+    ((is_init != 0) || (m_use_soret == 0))
+      ? Vector<std::array<MultiFab*, AMREX_SPACEDIM>>{}
+      : GetVecOfArrOfPtrs(diffData->soret_fluxes);
+
 #ifdef AMREX_USE_EB
   if (m_isothermalEB != 0) {
     computeDifferentialDiffusionFluxes(
@@ -176,12 +178,12 @@ PeleLM::computeDifferentialDiffusionTerms(
 #ifdef AMREX_USE_EB
     fluxDivergenceRD(
       GetVecOfConstPtrs(getSpeciesVect(a_time)), 0, GetVecOfPtrs(diffData->DT),
-      0, GetVecOfArrOfPtrs(diffData->soret_fluxes), 0, {}, 0, NUM_SPECIES, 1,
-      bcRecSpec_d.dataPtr(), -1.0, m_dt);
+      0, GetVecOfArrOfPtrs(diffData->soret_fluxes), 0, {}, 0, NUM_SPECIES,
+      intensiveFluxes, bcRecSpec_d.dataPtr(), -1.0, m_dt);
 #else
     fluxDivergence(
       GetVecOfPtrs(diffData->DT), 0, GetVecOfArrOfPtrs(diffData->soret_fluxes),
-      0, NUM_SPECIES, 1, -1.0);
+      0, NUM_SPECIES, intensiveFluxes, -1.0);
 #endif
   }
 
@@ -225,6 +227,94 @@ PeleLM::computeDifferentialDiffusionFluxes(
   // Get the species BCRec
   auto bcRecSpec = fetchBCRecArray(FIRSTSPEC, NUM_SPECIES);
 
+  Vector<MultiFab> spec_boundary;
+  if (m_soret_boundary_override != 0) {
+    spec_boundary.resize(finest_level + 1);
+    int have_soret_fluxes = (a_soretfluxes.empty() || m_sdcIter == 0) ? 0 : 1;
+    int have_wbar_fluxes = (a_wbarfluxes.empty() || m_sdcIter == 0) ? 0 : 1;
+    for (int lev = 0; lev <= finest_level; ++lev) {
+      auto* ldata_p = getLevelDataPtr(lev, AmrOldTime);
+      spec_boundary[lev].define(
+        grids[lev], dmap[lev], NUM_SPECIES, 1, MFInfo(), Factory(lev));
+      if (have_soret_fluxes == 0) { // no soret fluxes yet, set to zero and
+                                    // continue
+        spec_boundary[lev].setVal(0.0);
+        continue;
+      }
+
+      // if we have a mix of Dirichlet and Isothermal walls, we need to give
+      // Dirichlet boundaries and divide by density since diffuse_scalar doesn't
+      // touch this boundary MF
+
+      MultiFab::Copy(
+        spec_boundary[lev], ldata_p->state, FIRSTSPEC, 0, NUM_SPECIES, 1);
+      for (int n = 0; n < NUM_SPECIES; n++) {
+        MultiFab::Divide(spec_boundary[lev], ldata_p->state, DENSITY, n, 1, 1);
+      }
+
+      // Lets overwrite the boundaries with the fluxes for the inhomogeneous
+      // Neumann solve
+
+      // Get the edge centered diffusivities
+      MultiFab& ldata_beta_cc = ldata_p->diff_cc;
+      const Box& domain = geom[lev].Domain();
+      int doZeroVisc = 1;
+      int addTurbContribution = 0;
+      Array<MultiFab, AMREX_SPACEDIM> beta_ec = getDiffusivity(
+        lev, 0, NUM_SPECIES, doZeroVisc, bcRecSpec, ldata_beta_cc,
+        addTurbContribution);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+      for (MFIter mfi(ldata_beta_cc, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+          const auto bc_lo = m_phys_bc.lo(idim);
+          const auto bc_hi = m_phys_bc.hi(idim);
+          const Box& edomain = amrex::surroundingNodes(domain, idim);
+          const Box& ebx = mfi.nodaltilebox(idim);
+          auto const& rhoD_ec = beta_ec[idim].const_array(mfi);
+          auto const& flux_soret =
+            (have_soret_fluxes != 0)
+              ? a_soretfluxes[lev][idim]->const_array(mfi)
+              : rhoD_ec;
+          auto const& flux_wbar = (have_wbar_fluxes != 0)
+                                    ? a_wbarfluxes[lev][idim]->const_array(mfi)
+                                    : rhoD_ec;
+          auto const& boundary_ar = spec_boundary[lev].array(mfi);
+          amrex::ParallelFor(
+            ebx,
+            [flux_wbar, flux_soret, rhoD_ec, boundary_ar, idim, edomain, bc_lo,
+             bc_hi,
+             have_wbar_fluxes] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+              int idx[3] = {i, j, k};
+              bool on_lo = (bc_lo == BoundaryCondition::BCNoSlipWallIsotherm ||
+                            bc_lo == BoundaryCondition::BCSlipWallIsotherm) &&
+                           (idx[idim] <= edomain.smallEnd(idim));
+              bool on_hi = (bc_hi == BoundaryCondition::BCNoSlipWallIsotherm ||
+                            bc_hi == BoundaryCondition::BCSlipWallIsotherm) &&
+                           (idx[idim] >= edomain.bigEnd(idim));
+              if (on_lo || on_hi) {
+                if (on_lo) { // need to move -1 for lo boundary
+                  idx[idim] -= 1;
+                }
+                for (int n = 0; n < NUM_SPECIES; n++) {
+                  boundary_ar(idx[0], idx[1], idx[2], n) =
+                    flux_soret(i, j, k, n);
+                  // add lagged wbar flux
+                  if (have_wbar_fluxes != 0) {
+                    boundary_ar(idx[0], idx[1], idx[2], n) +=
+                      flux_wbar(i, j, k, n);
+                  }
+
+                  boundary_ar(idx[0], idx[1], idx[2], n) /= rhoD_ec(i, j, k, n);
+                }
+              }
+            });
+        }
+      }
+    }
+  }
+
 #ifdef PELE_USE_EFIELD
   // Get the species diffusion fluxes from the DiffusionOp
   // Don't average down just yet
@@ -234,7 +324,7 @@ PeleLM::computeDifferentialDiffusionFluxes(
       a_fluxes, 0, GetVecOfConstPtrs(getSpeciesVect(a_time)), 0,
       GetVecOfConstPtrs(getDensityVect(a_time)),
       GetVecOfConstPtrs(getDiffusivityVect(a_time)), 0, bcRecSpec,
-      NUM_SPECIES - NUM_IONS, do_avgDown);
+      NUM_SPECIES - NUM_IONS, do_avgDown, {});
   // Ions one by one
   for (int n = 0; n < NUM_IONS; n++) {
     auto bcRecIons = fetchBCRecArray(FIRSTSPEC + NUM_SPECIES - NUM_IONS + n, 1);
@@ -243,7 +333,7 @@ PeleLM::computeDifferentialDiffusionFluxes(
       GetVecOfConstPtrs(getSpeciesVect(a_time)), NUM_SPECIES - NUM_IONS + n,
       GetVecOfConstPtrs(getDensityVect(a_time)),
       GetVecOfConstPtrs(getDiffusivityVect(a_time)), NUM_SPECIES - NUM_IONS + n,
-      bcRecIons, 1, do_avgDown);
+      bcRecIons, 1, do_avgDown, {});
   }
 #else
   // Get the species diffusion fluxes from the DiffusionOp
@@ -254,7 +344,7 @@ PeleLM::computeDifferentialDiffusionFluxes(
       a_fluxes, 0, GetVecOfConstPtrs(getSpeciesVect(a_time)), 0,
       GetVecOfConstPtrs(getDensityVect(a_time)),
       GetVecOfConstPtrs(getDiffusivityVect(a_time)), 0, bcRecSpec, NUM_SPECIES,
-      do_avgDown);
+      do_avgDown, GetVecOfConstPtrs(spec_boundary));
 #endif
 
   // Add the wbar term
@@ -264,12 +354,14 @@ PeleLM::computeDifferentialDiffusionFluxes(
       addWbarTerm(
         a_fluxes, {}, GetVecOfConstPtrs(getSpeciesVect(a_time)),
         GetVecOfConstPtrs(getDensityVect(a_time)),
-        GetVecOfConstPtrs(getDiffusivityVect(a_time)));
+        GetVecOfConstPtrs(getDiffusivityVect(a_time)),
+        GetVecOfConstPtrs(spec_boundary));
     } else {
       addWbarTerm(
         a_fluxes, a_wbarfluxes, GetVecOfConstPtrs(getSpeciesVect(a_time)),
         GetVecOfConstPtrs(getDensityVect(a_time)),
-        GetVecOfConstPtrs(getDiffusivityVect(a_time)));
+        GetVecOfConstPtrs(getDiffusivityVect(a_time)),
+        GetVecOfConstPtrs(spec_boundary));
     }
   }
 
@@ -306,7 +398,6 @@ PeleLM::computeDifferentialDiffusionFluxes(
     // Set up EB dirichlet value and diffusivity
     Vector<MultiFab> EBvalue(finest_level + 1);
     Vector<MultiFab> EBdiff(finest_level + 1);
-    ;
     EBdiff.reserve(finest_level + 1);
     for (int lev = 0; lev <= finest_level; ++lev) {
       EBvalue[lev].define(
@@ -320,14 +411,14 @@ PeleLM::computeDifferentialDiffusionFluxes(
       GetVecOfConstPtrs(getTempVect(a_time)), 0, {},
       GetVecOfConstPtrs(getDiffusivityVect(a_time)), NUM_SPECIES,
       GetVecOfConstPtrs(EBvalue), GetVecOfConstPtrs(EBdiff), bcRecTemp, 1,
-      do_avgDown);
+      do_avgDown, {});
   } else
 #endif
   {
     getDiffusionOp()->computeDiffFluxes(
       a_fluxes, NUM_SPECIES, GetVecOfConstPtrs(getTempVect(a_time)), 0, {},
       GetVecOfConstPtrs(getDiffusivityVect(a_time)), NUM_SPECIES, bcRecTemp, 1,
-      do_avgDown);
+      do_avgDown, {});
   }
 
   // Differential diffusion term: \sum_k ( h_k * \Flux_k )
@@ -356,20 +447,28 @@ PeleLM::addWbarTerm(
   const Vector<Array<MultiFab*, AMREX_SPACEDIM>>& a_spwbarfluxes,
   Vector<MultiFab const*> const& a_spec,
   Vector<MultiFab const*> const& a_rho,
-  Vector<MultiFab const*> const& a_beta)
+  Vector<MultiFab const*> const& a_beta,
+  Vector<MultiFab const*> const& a_boundary)
 {
   //------------------------------------------------------------------------
   // if a container for wbar fluxes is provided, fill it
   int need_wbar_fluxes = (a_spwbarfluxes.empty()) ? 0 : 1;
-
+  int have_boundary = (a_boundary.empty()) ? 0 : 1;
   //------------------------------------------------------------------------
   // Compute Wbar on all the levels
   int nGrow = 1; // Need one ghost cell to compute gradWbar
   Vector<MultiFab> Wbar(finest_level + 1);
+  Vector<MultiFab> Wbar_boundary;
+  if (have_boundary != 0) {
+    Wbar_boundary.resize(finest_level + 1);
+  }
   for (int lev = 0; lev <= finest_level; ++lev) {
-
     Wbar[lev].define(grids[lev], dmap[lev], 1, nGrow, MFInfo(), Factory(lev));
-
+    if (have_boundary != 0) {
+      Wbar_boundary[lev].define(
+        grids[lev], dmap[lev], 1, nGrow, MFInfo(), Factory(lev));
+    }
+    const Box& domain = geom[lev].Domain();
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
@@ -378,10 +477,36 @@ PeleLM::addWbarTerm(
       auto const& rho_arr = a_rho[lev]->const_array(mfi);
       auto const& rhoY_arr = a_spec[lev]->const_array(mfi);
       auto const& Wbar_arr = Wbar[lev].array(mfi);
+      auto const& gradY_arr =
+        (have_boundary != 0) ? a_boundary[lev]->const_array(mfi) : Wbar_arr;
+      auto const& gradWbar_arr =
+        (have_boundary != 0) ? Wbar_boundary[lev].array(mfi) : Wbar_arr;
+
       amrex::ParallelFor(
-        gbx, [rho_arr, rhoY_arr,
-              Wbar_arr] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+        gbx,
+        [rho_arr, rhoY_arr, Wbar_arr, gradY_arr, gradWbar_arr, domain,
+         have_boundary,
+         phys_bc = m_phys_bc] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
           getMwmixGivenRY(i, j, k, rho_arr, rhoY_arr, Wbar_arr);
+          if (have_boundary != 0) { // need to impose gradWbar on boundary for
+                                    // computeGradient
+            gradWbar_arr(i, j, k) = Wbar_arr(i, j, k);
+            int idx[3] = {i, j, k};
+            for (int idim = 0; idim < AMREX_SPACEDIM; idim++) {
+              const auto bc_lo = phys_bc.lo(idim);
+              const auto bc_hi = phys_bc.hi(idim);
+              bool on_lo = (bc_lo == BoundaryCondition::BCNoSlipWallIsotherm ||
+                            bc_lo == BoundaryCondition::BCSlipWallIsotherm) &&
+                           (idx[idim] < domain.smallEnd(idim));
+              bool on_hi = (bc_hi == BoundaryCondition::BCNoSlipWallIsotherm ||
+                            bc_hi == BoundaryCondition::BCSlipWallIsotherm) &&
+                           (idx[idim] > domain.bigEnd(idim));
+              if (on_lo || on_hi) {
+                getGradMwmixGivengradYMwmix(
+                  i, j, k, gradY_arr, Wbar_arr, gradWbar_arr);
+              }
+            }
+          }
         });
     }
   }
@@ -406,7 +531,8 @@ PeleLM::addWbarTerm(
   }
   getDiffusionOp()->computeGradient(
     GetVecOfArrOfPtrs(gradWbar), {}, // Don't need the laplacian out
-    GetVecOfConstPtrs(Wbar), bcRecSpec[0], do_avgDown);
+    GetVecOfConstPtrs(Wbar), GetVecOfConstPtrs(Wbar_boundary), bcRecSpec[0],
+    do_avgDown);
 
   //------------------------------------------------------------------------
   // add Wbar term to species fluxes
@@ -531,7 +657,7 @@ PeleLM::addSoretTerm(
   }
   getDiffusionOp()->computeGradient(
     GetVecOfArrOfPtrs(gradT), {}, // Don't need the laplacian out
-    a_temp, bcRecTemp[0], do_avgDown);
+    a_temp, {}, bcRecTemp[0], do_avgDown);
 
   //------------------------------------------------------------------------
   // add Soret term to species fluxes
@@ -903,6 +1029,85 @@ PeleLM::differentialDiffusionUpdate(
   // Get the species BCRec
   auto bcRecSpec = fetchBCRecArray(FIRSTSPEC, NUM_SPECIES);
 
+  Vector<MultiFab> spec_boundary;
+  if (m_soret_boundary_override != 0) {
+    spec_boundary.resize(finest_level + 1);
+    for (int lev = 0; lev <= finest_level; ++lev) {
+      auto* ldata_p = getLevelDataPtr(lev, AmrOldTime);
+      spec_boundary[lev].define(
+        grids[lev], dmap[lev], NUM_SPECIES, 1, MFInfo(), Factory(lev));
+
+      // if we have a mix of Dirichlet and Isothermal walls, we need to give
+      // Dirichlet boundaries and divide by density since diffuse_scalar doesn't
+      // touch this boundary MF
+
+      MultiFab::Copy(
+        spec_boundary[lev], ldata_p->state, FIRSTSPEC, 0, NUM_SPECIES, 1);
+      for (int n = 0; n < NUM_SPECIES; n++) {
+        MultiFab::Divide(spec_boundary[lev], ldata_p->state, DENSITY, n, 1, 1);
+      }
+
+      // Lets overwrite the boundaries with the fluxes for the inhomogeneous
+      // Neumann solve
+
+      // Get the edge centered diffusivities
+      MultiFab& ldata_beta_cc = ldata_p->diff_cc;
+      const Box& domain = geom[lev].Domain();
+      int doZeroVisc = 1;
+      int addTurbContribution = 0;
+      Array<MultiFab, AMREX_SPACEDIM> beta_ec = getDiffusivity(
+        lev, 0, NUM_SPECIES, doZeroVisc, bcRecSpec, ldata_beta_cc,
+        addTurbContribution);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+      for (MFIter mfi(ldata_beta_cc, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+          const auto bc_lo = m_phys_bc.lo(idim);
+          const auto bc_hi = m_phys_bc.hi(idim);
+          const Box& edomain = amrex::surroundingNodes(domain, idim);
+          const Box& ebx = mfi.nodaltilebox(idim);
+          auto const& flux_soret =
+            diffData->soret_fluxes[lev][idim].const_array(mfi);
+          auto const& rhoD_ec = beta_ec[idim].const_array(mfi);
+          auto const& flux_wbar =
+            (m_use_wbar != 0)
+              ? diffData->wbar_fluxes[lev][idim].const_array(mfi)
+              : rhoD_ec;
+          auto const& boundary_ar = spec_boundary[lev].array(mfi);
+          amrex::ParallelFor(
+            ebx, [flux_wbar, flux_soret, rhoD_ec, boundary_ar, idim, edomain,
+                  bc_lo, bc_hi,
+                  use_wbar =
+                    m_use_wbar] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+              int idx[3] = {i, j, k};
+              bool on_lo = (bc_lo == BoundaryCondition::BCNoSlipWallIsotherm ||
+                            bc_lo == BoundaryCondition::BCSlipWallIsotherm) &&
+                           (idx[idim] <= edomain.smallEnd(idim));
+              bool on_hi = (bc_hi == BoundaryCondition::BCNoSlipWallIsotherm ||
+                            bc_hi == BoundaryCondition::BCSlipWallIsotherm) &&
+                           (idx[idim] >= edomain.bigEnd(idim));
+              if (on_lo || on_hi) {
+                if (on_lo) { // need to move -1 for lo boundary
+                  idx[idim] -= 1;
+                }
+                for (int n = 0; n < NUM_SPECIES; n++) {
+                  boundary_ar(idx[0], idx[1], idx[2], n) =
+                    flux_soret(i, j, k, n);
+                  // add lagged wbar flux
+                  if (use_wbar != 0) {
+                    boundary_ar(idx[0], idx[1], idx[2], n) +=
+                      flux_wbar(i, j, k, n);
+                  }
+                  boundary_ar(idx[0], idx[1], idx[2], n) /= rhoD_ec(i, j, k, n);
+                }
+              }
+            });
+        }
+      }
+    }
+  }
+
 #ifdef PELE_USE_EFIELD
   // Solve for \widetilda{rhoY^{np1,kp1}}
   // -> return the uncorrected fluxes^{np1,kp1}
@@ -917,7 +1122,7 @@ PeleLM::differentialDiffusionUpdate(
       GetVecOfConstPtrs(
         getDensityVect(AmrNewTime)), // this triggers proper scaling by density
       GetVecOfConstPtrs(getDiffusivityVect(AmrNewTime)), 0, bcRecSpec,
-      NUM_SPECIES - NUM_IONS, 0, m_dt);
+      NUM_SPECIES - NUM_IONS, 0, m_dt, {});
   // Ions one by one
   for (int n = 0; n < NUM_IONS; n++) {
     auto bcRecIons = fetchBCRecArray(FIRSTSPEC + NUM_SPECIES - NUM_IONS + n, 1);
@@ -930,7 +1135,7 @@ PeleLM::differentialDiffusionUpdate(
       GetVecOfConstPtrs(
         getDensityVect(AmrNewTime)), // this triggers proper scaling by density
       GetVecOfConstPtrs(getDiffusivityVect(AmrNewTime)), 0, bcRecIons, 1, 0,
-      m_dt);
+      m_dt, {});
   }
 #else
   // Solve for \widetilda{rhoY^{np1,kp1}}
@@ -946,7 +1151,7 @@ PeleLM::differentialDiffusionUpdate(
       GetVecOfConstPtrs(
         getDensityVect(AmrNewTime)), // this triggers proper scaling by density
       GetVecOfConstPtrs(getDiffusivityVect(AmrNewTime)), 0, bcRecSpec,
-      NUM_SPECIES, 0, m_dt);
+      NUM_SPECIES, 0, m_dt, GetVecOfConstPtrs(spec_boundary));
 #endif
 
   // Add lagged Wbar term
@@ -1088,7 +1293,7 @@ PeleLM::differentialDiffusionUpdate(
       GetVecOfConstPtrs(getTempVect(AmrNewTime)), 0, {},
       GetVecOfConstPtrs(getDiffusivityVect(AmrNewTime)), NUM_SPECIES,
       GetVecOfConstPtrs(EBvalue), GetVecOfConstPtrs(EBdiff), bcRecTemp, 1,
-      do_avgDown);
+      do_avgDown, {});
   } else
 #endif
   {
@@ -1096,7 +1301,7 @@ PeleLM::differentialDiffusionUpdate(
       GetVecOfArrOfPtrs(fluxes), NUM_SPECIES,
       GetVecOfConstPtrs(getTempVect(AmrNewTime)), 0, {},
       GetVecOfConstPtrs(getDiffusivityVect(AmrNewTime)), NUM_SPECIES, bcRecTemp,
-      1, do_avgDown);
+      1, do_avgDown, {});
   }
 
   // Differential diffusion term: \sum_k ( h_k * \Flux_k )
@@ -1177,7 +1382,7 @@ PeleLM::differentialDiffusionUpdate(
         GetVecOfConstPtrs(rhs), 0, GetVecOfArrOfPtrs(fluxes), NUM_SPECIES,
         GetVecOfConstPtrs(RhoCp), {},
         GetVecOfConstPtrs(getDiffusivityVect(AmrNewTime)), NUM_SPECIES,
-        GetVecOfConstPtrs(EBdiff), 0, bcRecTemp, 1, 0, m_dt);
+        GetVecOfConstPtrs(EBdiff), 0, bcRecTemp, 1, 0, m_dt, {});
     } else
 #endif
     {
@@ -1185,7 +1390,7 @@ PeleLM::differentialDiffusionUpdate(
         GetVecOfPtrs(getTempVect(AmrNewTime)), 0, GetVecOfConstPtrs(rhs), 0,
         GetVecOfArrOfPtrs(fluxes), NUM_SPECIES, GetVecOfConstPtrs(RhoCp), {},
         GetVecOfConstPtrs(getDiffusivityVect(AmrNewTime)), NUM_SPECIES,
-        bcRecTemp, 1, 0, m_dt);
+        bcRecTemp, 1, 0, m_dt, {});
     }
 
     // Post deltaT iteration linear solve
@@ -1332,14 +1537,14 @@ PeleLM::deltaTIter_update(
       GetVecOfConstPtrs(getTempVect(AmrNewTime)), 0, {},
       GetVecOfConstPtrs(getDiffusivityVect(AmrNewTime)), NUM_SPECIES,
       GetVecOfConstPtrs(EBvalue), GetVecOfConstPtrs(EBdiff), bcRecTemp, 1,
-      do_avgDown);
+      do_avgDown, {});
   } else
 #endif
   {
     getDiffusionOp()->computeDiffFluxes(
       a_fluxes, NUM_SPECIES, GetVecOfConstPtrs(getTempVect(AmrNewTime)), 0, {},
       GetVecOfConstPtrs(getDiffusivityVect(AmrNewTime)), NUM_SPECIES, bcRecTemp,
-      1, do_avgDown);
+      1, do_avgDown, {});
   }
 
   // Differential diffusion term: \sum_k ( h_k * \Flux_k )
@@ -1517,6 +1722,19 @@ PeleLM::getDiffusionLinOpBC(Orientation::Side a_side, const BCRec& a_bc)
         amrexbc == amrex::BCType::hoextrap ||
         amrexbc == amrex::BCType::reflect_even) {
         r[idim] = LinOpBCType::Neumann;
+        if (
+          m_use_soret != 0 &&
+          amrexbc == amrex::BCType::foextrap) { // should just catch
+                                                // density/species/forcing for
+                                                // isothermal walls
+          auto phys_bc = (a_side == Orientation::low) ? m_phys_bc.lo(idim)
+                                                      : m_phys_bc.hi(idim);
+          if (
+            phys_bc == BoundaryCondition::BCNoSlipWallIsotherm ||
+            phys_bc == BoundaryCondition::BCSlipWallIsotherm) {
+            r[idim] = LinOpBCType::inhomogNeumann;
+          }
+        }
       } else if (amrexbc == amrex::BCType::reflect_odd) {
         r[idim] = LinOpBCType::reflect_odd;
       } else {
