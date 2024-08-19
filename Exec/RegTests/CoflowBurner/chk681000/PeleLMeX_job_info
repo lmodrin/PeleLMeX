@@ -1,0 +1,223 @@
+ ==============================================================================
+ PeleLMeX Job Information
+ ==============================================================================
+number of MPI processes: 1
+
+
+ ==============================================================================
+ Build Information
+ ==============================================================================
+build date:    2024-07-26 07:43:08.955509
+build machine: Linux ellis.hpc.nrel.gov 4.18.0-553.5.1.el8_10.x86_64 #1 SMP Thu Jun 6 09:41:19 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux
+build dir:     /projects/hpacf/marc/src/CCSE/PeleLMeX/Exec/Production/Karol
+AMReX dir:     /projects/hpacf/marc/src/CCSE/PeleLMeX/Submodules/PelePhysics/Submodules/amrex
+
+COMP:          gnu
+COMP version:  12.3.0
+C++ compiler:  
+C++ flags:     
+
+PeleLMeX     git describe: v23.11-69-ge79f505
+AMReX        git describe: 1da9115
+PelePhysics  git describe: 82dbfcb
+AMREX-Hydro  git describe: 82dbfcb
+
+
+ ==============================================================================
+ Grid Information
+ ==============================================================================
+ level: 0
+   number of boxes = 4
+   maximum zones   = 64 256 
+
+ level: 1
+   number of boxes = 1
+   maximum zones   = 128 512 
+
+ level: 2
+   number of boxes = 2
+   maximum zones   = 256 1024 
+
+ level: 3
+   number of boxes = 3
+   maximum zones   = 512 2048 
+
+
+
+ ==============================================================================
+ Inputs File Parameters
+ ==============================================================================
+prob.Xmax = 0.0185
+prob.Ymax = 0.037
+prob.Zmax = 0.0185
+geometry.is_periodic = 0 0
+geometry.coord_sys = 1
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = 0.05 0.20
+peleLM.lo_bc = Symmetry Inflow
+peleLM.hi_bc = SlipWallAdiab Outflow
+amr.n_cell = 64 256 32
+amr.v = 1
+amr.max_level = 3
+amr.ref_ratio = 2 2 2 2
+amr.regrid_int = 2
+amr.n_error_buf = 4 4 4 2
+amr.grid_eff = 0.7
+amr.blocking_factor = 16
+amr.max_grid_size = 64
+prob.Xf = 0.0012
+prob.Xe = 0.0001
+prob.Xc = 0.0135
+prob.Yin = 0.003
+prob.V_fu = 0.19
+prob.V_ox = 0.031
+prob.V_air = 0.0
+prob.T_fu = 300
+prob.T_ox = 300
+prob.T_air = 300
+prob.T_obst = 450
+prob.do_ignition = 1
+prob.ign_rad = 0.001
+prob.ign_T = 1900
+prob.P_mean = 100000.0
+prob.dilution = 1.0
+prob.PhiV_y_hi(nvals = 1)  :: [-5500.0]
+prob.PhiV_y_lo(nvals = 1)  :: [0.0]
+prob.PhiV_x_hi(nvals = 1)  :: [0.0]
+prob.PhiV_x_lo(nvals = 1)  :: [0.0]
+peleLM.gravity = 0.0 -9.81 0.0
+peleLM.v = 2
+peleLM.incompressible = 0
+peleLM.rho(nvals = 1)  :: [1.17]
+peleLM.mu(nvals = 1)  :: [0.0]
+peleLM.use_wbar = 1
+peleLM.sdc_iterMax = 2
+peleLM.num_init_iter = 3
+peleLM.advection_scheme = Godunov_PLM
+peleLM.do_temporals = 1
+peleLM.do_mass-balance(nvals = 1)  :: [1]
+peleLM.deltaT_verbose = 1
+peleLM.deltaT_iterMax = 15
+peleLM.deltaT_crashIfFailing = 0
+peleLM.floor_species = 0
+amr.check_int = 1000
+amr.plot_int = 1000
+amr.max_step = 8000000
+amr.dt_shrink = 0.01
+amr.max_dt = 1.e-6
+amr.init_dt = 0.000001
+amr.cfl = 0.8
+amr.derive_plot_vars = avg_pressure mag_vort mass_fractions chargedistrib efieldx efieldy LorentzFx LorentzFy
+peleLM.chem_integrator = ReactorCvode
+peleLM.use_typ_vals_chem = 1
+ode.rtol = 1.0e-7
+ode.atol = 1.0e-6
+cvode.solve_type = denseAJ_direct
+cvode.max_order = 4
+ef.phiV_lc_bc(nvals = 2)  :: [Dirichlet, Neumann]
+ef.phiV_hi_bc(nvals = 2)  :: [Dirichlet, Neumann]
+ef.phiV_polarity_lo(nvals = 2)  :: [Neutral, Cathode]
+ef.phiV_polarity_hi(nvals = 2)  :: [Neutral, Anode]
+ef.restart_nonEF(nvals = 1)  :: [1]
+ef.plot_extras(nvals = 1)  :: [1]
+ef.do_ionsBalance(nvals = 1)  :: [1]
+ef.GMRES_rel_tol(nvals = 1)  :: [1.0e-6]
+ef.GMRES_abs_tol(nvals = 1)  :: [1.0e-13]
+ef.JFNK_lambda(nvals = 1)  :: [1.0e-7]
+ef.JFNK_diffType(nvals = 1)  :: [1]
+ef.PC_approx(nvals = 1)  :: [2]
+def.PC_damping(nvals = 1)  :: [0.95]
+ef.advection_scheme_order(nvals = 1)  :: [1]
+ef.precond.diff_verbose(nvals = 1)  :: [0]
+ef.precond.Stilda_verbose(nvals = 1)  :: [0]
+ef.precond.fixedIter(nvals = 1)  :: [7]
+geres.krylovBasis_size(nvals = 1)  :: [20]
+geres.verbose(nvals = 1)  :: [0]
+geres.max_restart(nvals = 1)  :: [3]
+amr.refinement_indicators = HR flamme
+amr.HR.max_level = 3
+amr.HR.value_greater = 5e7
+amr.HR.field_name = HeatRelease
+amr.flamme.max_level = 3
+amr.flamme.value_greater = 600
+amr.flamme.value_greater = 1400
+amr.flamme.field_name = temp
+amr.DU.max_level(nvals = 1)  :: [3]
+amr.DU.value_greater(nvals = 1)  :: [0.1]
+amr.DU.field_name(nvals = 1)  :: [y_velocity]
+amr.restart = chk214000
+cvode.solve_type = GMRES
+amrex.v = 1
+amrex.verbose = 1
+amrex.max_gpu_streams = 4
+device.v = 0
+device.verbose = 0
+device.numThreads.x = 0
+device.numThreads.y = 0
+device.numThreads.z = 0
+device.numBlocks.x = 0
+device.numBlocks.y = 0
+device.numBlocks.z = 0
+device.graph_init = 0
+device.graph_init_nodes = 10000
+amrex.regtest_reduction = 0
+amrex.signal_handling = 1
+amrex.throw_exception = 0
+amrex.call_addr2line = 1
+amrex.abort_on_unused_inputs = 0
+amrex.handle_sigsegv = 1
+amrex.handle_sigterm = 0
+amrex.handle_sigint = 1
+amrex.handle_sigabrt = 1
+amrex.handle_sigfpe = 1
+amrex.handle_sigill = 1
+amrex.fpe_trap_invalid = 0
+amrex.fpe_trap_zero = 0
+amrex.fpe_trap_overflow = 0
+amrex.use_gpu_aware_mpi = 0
+amrex.the_arena_init_size = 31808323584
+amrex.the_device_arena_init_size = 8388608
+amrex.the_managed_arena_init_size = 8388608
+amrex.the_pinned_arena_init_size = 8388608
+amrex.the_comms_arena_init_size = 8388608
+amrex.the_arena_release_threshold = 9223372036854775807
+amrex.the_device_arena_release_threshold = 9223372036854775807
+amrex.the_managed_arena_release_threshold = 9223372036854775807
+amrex.the_pinned_arena_release_threshold = 21205549056
+amrex.the_comms_arena_release_threshold = 9223372036854775807
+amrex.the_async_arena_release_threshold = 9223372036854775807
+amrex.the_arena_is_managed = 0
+amrex.abort_on_out_of_gpu_memory = 0
+fab.init_snan = 0
+DistributionMapping.v = 0
+DistributionMapping.verbose = 0
+DistributionMapping.efficiency = 0.90000000000000002
+DistributionMapping.sfc_threshold = 0
+DistributionMapping.node_size = 0
+DistributionMapping.verbose_mapper = 0
+fab.initval = nan
+fab.do_initval = 0
+fabarray.maxcomp = 25
+amrex.mf.alloc_single_chunk = 0
+vismf.v = 0
+vismf.headerversion = 1
+vismf.groupsets = 0
+vismf.setbuf = 1
+vismf.usesingleread = 0
+vismf.usesinglewrite = 0
+vismf.checkfilepositions = 0
+vismf.usepersistentifstreams = 0
+vismf.usesynchronousreads = 0
+vismf.usedynamicsetselection = 1
+vismf.iobuffersize = 2097152
+vismf.allowsparsewrites = 1
+amrex.async_out = 0
+amrex.async_out_nfiles = 64
+amrex.vector_growth_factor = 1.5
+machine.verbose = 0
+machine.very_verbose = 0
+amr.n_proper = 1
+amr.refine_grid_layout = 1
+amr.refine_grid_layout_x = 1
+amr.refine_grid_layout_y = 1
+amr.check_input = 1
